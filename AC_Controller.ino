@@ -1,5 +1,5 @@
 /*
-  ESP32 AC Controller v3.3 (Added Display Toggle Button)
+  ESP32 AC Controller v3.4 (Humidity Safeguard + Fan Timeout + 10m Resend + Safe Removable LCD)
   SHT31 + IR LED + LCD 16x2 (I2C) + web UI + feels-like control + history graph
   + outdoor temperature from the internet (Open-Meteo) used by the algorithm
 
@@ -45,7 +45,7 @@ const float    OFF_OFFSET_HOT  = 1.5;
 const float    HEAT_RANGE      = 8.0;
 
 const uint32_t MIN_CHANGE_MS   = 1UL * 60UL * 1000UL;  // 1 minute delay
-const uint32_t RESEND_MS       = 10UL * 60UL * 1000UL;
+const uint32_t RESEND_MS       = 10UL * 60UL * 1000UL; // 10 minutes periodic state re-send
 const uint32_t LOG_MS          = 5UL * 60UL * 1000UL;
 const uint32_t SAVE_MS         = 30UL * 60UL * 1000UL;
 const float    TEMP_OFFSET     = 0.0;
@@ -89,6 +89,7 @@ bool  mockSensor = true;
 AcState acState = ST_OFF;
 uint32_t lastChange = 0, lastSend = 0, lastRead = 0;
 uint32_t lastLog = 0, lastSave = 0, lastWifi = 0, lastDisp = 0;
+uint32_t fanStartTime = 0; // Tracks duration when state is FAN in auto mode
 bool firstRun = true;
 
 // Single-line HTML string including the Display Toggle button
@@ -219,22 +220,55 @@ void control() {
   uint32_t now = millis();
 
   if (!autoMode) {
-    if (now - lastSend > RESEND_MS) applyState(acState, true);
+    if (now - lastSend > RESEND_MS) {
+      applyState(acState, true); // Periodic 10-minute refresh in manual mode
+    }
     return;
   }
+
   float ct = controlTemp();
   float k = heatLoad();
   float onOff  = ON_OFFSET_MILD  + (ON_OFFSET_HOT  - ON_OFFSET_MILD)  * k;
   float offOff = OFF_OFFSET_MILD + (OFF_OFFSET_HOT - OFF_OFFSET_MILD) * k;
 
   AcState want = acState;
-  if (ct >= targetT + onOff) want = ST_COOL;
-  else if (ct <= targetT - offOff) want = ST_FAN;
+
+  // 1. Humidity Safeguard with Hysteresis (Trigger Dry at >80%, Release at <=70%)
+  if (acState != ST_DRY && curH > 80.0f) {
+    want = ST_DRY;
+  } else if (acState == ST_DRY) {
+    if (curH <= 70.0f) {
+      // Humidity recovered, drop back to temperature-based evaluation
+      want = (ct >= targetT + onOff) ? ST_COOL : ST_FAN;
+    }
+  } else {
+    // Standard Temperature / Feels-like Auto Control Loop
+    if (ct >= targetT + onOff) {
+      want = ST_COOL;
+    } else if (ct <= targetT - offOff) {
+      want = ST_FAN;
+    }
+  }
+
+  // 2. Auto Mode Fan Timeout: If state is FAN for 15 continuous minutes, turn OFF
+  if (want == ST_FAN) {
+    if (acState != ST_FAN) {
+      fanStartTime = now; // Start tracking fan duration
+    } else if (now - fanStartTime >= 15UL * 60UL * 1000UL) {
+      want = ST_OFF;
+    }
+  } else {
+    fanStartTime = now; // Reset timer if not in fan mode
+  }
 
   if (firstRun) { firstRun = false; lastChange = now - MIN_CHANGE_MS; }
 
-  if (want != acState && now - lastChange >= MIN_CHANGE_MS) applyState(want);
-  else if (now - lastSend > RESEND_MS) applyState(acState, true);
+  // Apply state changes with 1-minute minimum delay, or periodic 10-minute resend heartbeat
+  if (want != acState && now - lastChange >= MIN_CHANGE_MS) {
+    applyState(want);
+  } else if (want == acState && now - lastSend > RESEND_MS) {
+    applyState(acState, true); // Periodic 10-minute state refresh heartbeat
+  }
 }
 
 void handleStatus() {
@@ -278,7 +312,6 @@ void handleManual() {
   server.send(200, "text/plain", "ok");
 }
 
-// Handler for Display Toggle (does not disable auto mode)
 void handleDisplayToggle() {
   sendRaw(RAW_DISP, sizeof(RAW_DISP) / 2);
   Serial.println("[CONTROL] AC Display Toggle Signal Sent (Auto mode preserved)");
@@ -341,6 +374,7 @@ void handleManifest() {
   })JSON");
 }
 
+// Safe display function that handles missing/unplugged LCD without crashing
 void updateDisplay() {
   if (!lcdOk) return;
   char row1[17], row2[17];
@@ -351,10 +385,16 @@ void updateDisplay() {
   snprintf(row1, sizeof(row1), "T%.1f F%.1f H%d%%", fT, fF, iH);
   snprintf(row2, sizeof(row2), "AC: %-11s", stateName[acState]);
   
-  lcd.setCursor(0, 0);
-  lcd.print(row1);
-  lcd.setCursor(0, 1);
-  lcd.print(row2);
+  // Wrap I2C calls in error protection so unplugging LCD doesn't break execution
+  Wire.beginTransmission(0x27);
+  if (Wire.endTransmission() == 0) {
+    lcd.setCursor(0, 0);
+    lcd.print(row1);
+    lcd.setCursor(0, 1);
+    lcd.print(row2);
+  } else {
+    lcdOk = false; // Mark display inactive if unplugged at runtime
+  }
 }
 
 void enhancedSerialLog() {
@@ -397,16 +437,24 @@ void setup() {
   }
 
   Wire.begin(21, 22);
-  Wire.setClock(400000);
+  Wire.setClock(100000); // 100kHz for stable I2C communication with sensor and LCD backpack
+  delay(100);
   sht31.begin(0x44);
 
-  lcd.init();
-  lcd.backlight();
-  lcdOk = true;
-  lcd.setCursor(0, 0);
-  lcd.print("AC Controller v3");
-  lcd.setCursor(0, 1);
-  lcd.print("Booting up...");
+  // Safe LCD initialization check (won't lock up if LCD is unplugged at boot)
+  Wire.beginTransmission(0x27);
+  if (Wire.endTransmission() == 0) {
+    lcd.init();
+    lcd.backlight();
+    lcdOk = true;
+    lcd.setCursor(0, 0);
+    lcd.print("AC Controller v3");
+    lcd.setCursor(0, 1);
+    lcd.print("Booting up...");
+  } else {
+    lcdOk = false;
+    Serial.println("[SETUP] LCD not detected on I2C address 0x27 (Running headless)");
+  }
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -432,7 +480,7 @@ void setup() {
   server.on("/api/status", handleStatus);
   server.on("/api/set", handleSet);
   server.on("/api/manual", handleManual);
-  server.on("/api/display", handleDisplayToggle); // Added display toggle route
+  server.on("/api/display", handleDisplayToggle);
   server.on("/api/history", handleHistory);
   server.begin();
 
