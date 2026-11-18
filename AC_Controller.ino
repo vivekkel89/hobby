@@ -396,12 +396,34 @@ void updateDisplay() {
   if (!lcdOk) return;
   char row1[17], row2[17];
   float fT = isnan(curT) ? 0.0f : curT;
-  float fF = isnan(curT) || isnan(curH) ? fT : feelsLike(curT, curH);
   int iH   = isnan(curH) ? 0 : (int)lroundf(curH);
+
+  // Get current time from NTP sync
+  time_t now = nowTs();
+  struct tm timeinfo;
+  char timeStr[6] = "--:--";
+  char dateStr[7] = "--/--";
   
-  snprintf(row1, sizeof(row1), "T%.1f F%.1f H%d%%", fT, fF, iH);
-  snprintf(row2, sizeof(row2), "AC: %-11s", stateName[acState]);
-  
+  if (now > 0) {
+    localtime_r(&now, &timeinfo);
+    strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+    strftime(dateStr, sizeof(dateStr), "%d-%b", &timeinfo);
+  }
+
+  // Shorten state names to fit cleanly (COOLING -> COOL)
+  const char* shortState = "OFF";
+  if (acState == ST_COOL) shortState = "COOL";
+  else if (acState == ST_FAN) shortState = "FAN";
+  else if (acState == ST_DRY) shortState = "DRY";
+
+  // Row 1: Temp, Humidity, Time (Max 16 chars: "T28.5 H74% 14:35")
+  snprintf(row1, sizeof(row1), "T%.1f H%%d %s", fT, iH, timeStr); // format cleanly
+  snprintf(row1, sizeof(row1), "T%.1f H%d%% %s", fT, iH, timeStr);
+
+  // Row 2: AC State & Short Date (Max 16 chars: "AC: COOL | 28-May")
+  snprintf(row2, sizeof(row2), "AC: %-4s | %s", shortState, dateStr);
+
+  // Safe I2C transmission check
   Wire.beginTransmission(0x27);
   if (Wire.endTransmission() == 0) {
     lcd.setCursor(0, 0);
@@ -409,13 +431,24 @@ void updateDisplay() {
     lcd.setCursor(0, 1);
     lcd.print(row2);
   } else {
-    lcdOk = false;
+    lcdOk = false; // Mark inactive if unplugged at runtime
   }
 }
 
 void enhancedSerialLog() {
   time_t ts = nowTs();
-  if (!ts) return;
+  if (!ts) {
+    Serial.println("[LOG] Timestamp not yet synchronized via NTP");
+    return;
+  }
+
+  // Convert Unix timestamp to local broken-down time structure
+  struct tm timeinfo;
+  localtime_r(&ts, &timeinfo);
+  
+  // Format into a readable string (e.g., "2026-05-18 14:35:48")
+  char timeStr[25];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
 
   char outTempStr[8];
   if (outdoorValid()) {
@@ -424,8 +457,8 @@ void enhancedSerialLog() {
     strcpy(outTempStr, "N/A");
   }
 
-  Serial.printf("[LOG] %lu, LocalT:%.1f, FeelsT:%.1f, RH:%.0f%%, OutdoorT:%s, ACState:%s, Mode:%s\n",
-                (unsigned long)ts,
+  Serial.printf("[LOG] %s | LocalT:%.1f, FeelsT:%.1f, RH:%.0f%%, OutdoorT:%s, ACState:%s, Mode:%s\n",
+                timeStr,
                 isnan(curT) ? 0.0f : curT,
                 controlTemp(),
                 isnan(curH) ? 0.0f : curH,
