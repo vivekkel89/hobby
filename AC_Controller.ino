@@ -1,6 +1,6 @@
 /*
-  ESP32 AC Controller v3.4 (Humidity Safeguard + Fan Timeout + 10m Resend + Safe Removable LCD)
-  SHT31 + IR LED + LCD 16x2 (I2C) + web UI + feels-like control + history graph
+  ESP32 AC Controller v3.5 (Humidity Priority Mode + Dual Sliders + 15m Fan Timeout)
+  SHT31 + IR LED + LCD 16x2 (I2C) + web UI + history graph
   + outdoor temperature from the internet (Open-Meteo) used by the algorithm
 
   Libraries (Library Manager): Adafruit SHT31, IRremoteESP8266,
@@ -86,14 +86,18 @@ bool  autoMode = true;
 bool  useFeels = true;
 bool  useOutdoor = true;
 bool  mockSensor = true;
+bool  humidPriority = false;
+float targetHighH = 80.0;
+float targetLowH = 70.0;
+
 AcState acState = ST_OFF;
 uint32_t lastChange = 0, lastSend = 0, lastRead = 0;
 uint32_t lastLog = 0, lastSave = 0, lastWifi = 0, lastDisp = 0;
-uint32_t fanStartTime = 0; // Tracks duration when state is FAN in auto mode
+uint32_t fanStartTime = 0;
 bool firstRun = true;
 
-// Single-line HTML string including the Display Toggle button
-const char PAGE[] PROGMEM = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#111111'><link rel='manifest' href='/manifest.json'><title>AC Controller</title><style>body{font-family:system-ui;margin:0;padding:16px;background:#111;color:#eee;max-width:460px;margin:auto}.card{background:#1d1d1d;border-radius:14px;padding:16px;margin-bottom:14px}.big{font-size:34px;font-weight:600}.row{display:flex;justify-content:space-around;text-align:center}.lbl{color:#999;font-size:13px}input[type=range]{width:100%}button{padding:9px 13px;border:0;border-radius:10px;background:#333;color:#eee;font-size:15px;margin:3px;cursor:pointer}button.on{background:#2a7}.st{font-size:20px;text-align:center}canvas{width:100%;height:200px;display:block;margin-top:8px}.lg span{margin-right:10px;font-size:12px;color:#999}.lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}</style></head><body><div class='card'><div class='row'><div><div class='big' id='t'>28.5</div><div class='lbl'>Temp &deg;C</div></div><div><div class='big' id='f'>29.2</div><div class='lbl'>Feels like</div></div><div><div class='big' id='h'>65</div><div class='lbl'>Humidity %</div></div></div><div class='lbl' style='text-align:center;margin-top:12px'>Outside (Kuriachira): <b id='o' style='color:#eee;font-size:18px'>--</b> &deg;C <span id='hint' style='color:#EF9F27'></span></div><div class='st' style='margin-top:10px'>AC: <b id='s'>OFF</b></div></div><div class='card'><div class='lbl'><span id='tl'>Target</span>: <b id='tv'>27.0</b> &deg;C</div><input type='range' id='tt' min='20' max='40' step='0.5' value='27.0' oninput='window.editing=1;document.getElementById(\"tv\").textContent=this.value' onchange='window.saveSettings()'><div style='margin-top:12px'><label><input type='checkbox' id='au' checked onchange='window.saveSettings()'> Auto control</label></div><div style='margin-top:6px'><label><input type='checkbox' id='fe' checked onchange='window.saveSettings()'> Use feels-like temperature</label></div><div style='margin-top:6px'><label><input type='checkbox' id='ue' checked onchange='window.saveSettings()'> Adapt to outdoor temperature</label></div><div style='margin-top:6px'><label><input type='checkbox' id='mo' checked onchange='window.saveSettings()'> Mock sensor (Test mode)</label></div></div><div class='card'><div class='lbl'>Manual Control (turns Auto off)</div><button onclick=\"window.sendManual('cool')\">Cool</button><button onclick=\"window.sendManual('fan')\">Fan</button><button onclick=\"window.sendManual('dry')\">Dry</button><button onclick=\"window.sendManual('off')\">Off</button></div><div class='card'><div class='lbl'>Actions (Keeps Auto active)</div><button onclick=\"window.sendDisplay()\" style=\"background:#2563eb\">Display Toggle</button></div><div class='card'><div style='display:flex;justify-content:space-between;align-items:center'><b>History</b><div><button class='rg' data-h='6' onclick='window.loadHist(6)'>6h</button><button class='rg on' data-h='24' onclick='window.loadHist(24)'>24h</button><button class='rg' data-h='168' onclick='window.loadHist(168)'>7d</button></div></div><canvas id='c'></canvas><div class='lg' style='margin-top:6px'><span><i style='background:#EF9F27'></i>Temp</span><span><i style='background:#D85A30'></i>Feels like</span><span><i style='background:#378ADD'></i>Humidity</span><span><i style='background:#97A3AB'></i>Outside</span><br><span><i style='background:rgba(55,138,221,.4)'></i>Cooling</span><span><i style='background:rgba(50,205,50,.8)'></i>Fan mode</span><span><i style='background:rgba(29,158,117,.4)'></i>Dry mode</span></div><div style='margin-top:8px'><label class='lbl'><input type='checkbox' id='so' onchange='if(window.lastD)window.drawGraph(window.lastD)'> Show outside</label></div></div><div class='lbl' style='text-align:center;margin-bottom:10px'>Outdoor data: <a href='https://open-meteo.com/' style='color:#999'>Open-Meteo.com</a></div><script>window.editing=0;window.hrs=24;window.lastD=null;function computeFeels(t,h){return t+0.33*(h/100*6.105*Math.exp(17.27*t/(237.7+t)))-4;}window.pollStatus=async function(){try{const res=await fetch('/api/status');const r=await res.json();document.getElementById('t').textContent=r.t.toFixed(1);document.getElementById('f').textContent=r.f.toFixed(1);document.getElementById('h').textContent=r.h.toFixed(0);document.getElementById('s').textContent=r.state;document.getElementById('o').textContent=r.o==null?'--':r.o.toFixed(1);document.getElementById('hint').textContent=r.hint?'· cooler outside, open window':'';document.getElementById('tl').textContent=r.feels?'Target feels-like':'Target temperature';if(!window.editing){document.getElementById('tt').value=r.tt;document.getElementById('au').checked=r.auto;document.getElementById('fe').checked=r.feels;document.getElementById('ue').checked=r.uo;document.getElementById('mo').checked=r.mock;document.getElementById('tv').textContent=r.tt;}}catch(e){console.error('Poll error:',e);}};window.saveSettings=async function(){console.log('Saving settings to ESP32...');try{const tt=document.getElementById('tt').value;const au=document.getElementById('au').checked?1:0;const fe=document.getElementById('fe').checked?1:0;const ue=document.getElementById('ue').checked?1:0;const mo=document.getElementById('mo').checked?1:0;await fetch(`/api/set?temp=${tt}&auto=${au}&feels=${fe}&out=${ue}&mock=${mo}`);window.editing=0;window.pollStatus();}catch(e){console.error('Save error:',e);}};window.sendManual=async function(m){console.log('Manual mode trigger:',m);try{await fetch('/api/manual?m='+m);window.pollStatus();}catch(e){console.error('Manual error:',e);}};window.sendDisplay=async function(){console.log('Display toggle trigger');try{await fetch('/api/display');window.pollStatus();}catch(e){console.error('Display error:',e);}};window.loadHist=async function(n){window.hrs=n;document.querySelectorAll('.rg').forEach(b=>b.classList.toggle('on',b.dataset.h==n));try{const res=await fetch('/api/history?hours='+n);const d=await res.json();window.lastD=d;window.drawGraph(d);}catch(e){console.error('History error:',e);}};window.drawGraph=function(d){const c=document.getElementById('c');if(!c)return;const dp=window.devicePixelRatio||1;const W=c.clientWidth||300;const H=200;c.width=W*dp;c.height=H*dp;const g=c.getContext('2d');g.scale(dp,dp);const P=d.p;g.font='11px system-ui';g.fillStyle='#999';if(!P||P.length<2){g.fillText('Collecting data... (one point every 5 min)',8,24);return;}const t0=P[0][0],t1=P[P.length-1][0],L=35,R=30,T=10,B=20,w=W-L-R,h=H-T-B;const so=document.getElementById('so').checked;const ov=P.map(p=>p[4]==null?null:p[4]/10);const tv=P.map(p=>p[1]/10);const hv=P.map(p=>p[2]/10);const fv=P.map((p,i)=>computeFeels(tv[i],hv[i]));const all=tv.concat(fv,so?ov.filter(v=>v!=null):[]);const lo=Math.floor(Math.min(...all)-1);const hi=Math.ceil(Math.max(...all)+1);const X=t=>L+(t-t0)/(t1-t0)*w;const Y=v=>T+h-(v-lo)/(hi-lo)*h;g.strokeStyle='rgba(255,255,255,0.08)';g.lineWidth=1;g.fillStyle='#777';const stepV=Math.max(1,Math.round((hi-lo)/4));for(let v=Math.ceil(lo);v<=hi;v+=stepV){const py=Y(v);g.beginPath();g.setLineDash([3,3]);g.moveTo(L,py);g.lineTo(W-R,py);g.stroke();g.setLineDash([]);g.fillText(v+'\\u00b0C',2,py+3);}for(let i=0;i<P.length-1;i++){const s=P[i][3];if(s&&P[i+1][0]-P[i][0]<=d.step*3){if(s==1)g.fillStyle='rgba(55,138,221,.22)';else if(s==2)g.fillStyle='rgba(50,205,50,.8)';else if(s==3)g.fillStyle='rgba(29,158,117,.22)';else g.fillStyle='rgba(255,255,255,.05)';g.fillRect(X(P[i][0]),T,Math.max(1,X(P[i+1][0])-X(P[i][0])),h);}}const ln=(v,Yf,col,dash)=>{g.beginPath();g.strokeStyle=col;g.lineWidth=2;g.setLineDash(dash||[]);let pen=0;for(let i=0;i<P.length;i++){if(v[i]==null){pen=0;continue;}if(i&&P[i][0]-P[i-1][0]>d.step*3)pen=0;const px=X(P[i][0]),py=Yf(v[i]);if(pen)g.lineTo(px,py);else{g.moveTo(px,py);pen=1;}}g.stroke();g.setLineDash([]);};ln(hv,Y,'#378ADD');if(so)ln(ov,Y,'#97A3AB',[5,3]);ln(fv,Y,'#D85A30');ln(tv,Y,'#EF9F27');const f=t=>{const D=new Date(t*1000);return(window.hrs>24?D.toLocaleDateString([],{day:'numeric',month:'short'})+' ':'')+D.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});};g.textAlign='left';g.fillText(f(t0),L,H-4);g.textAlign='right';g.fillText(f(t1),W-R,H-4);};window.pollStatus();window.loadHist(24);setInterval(window.pollStatus,3000);setInterval(()=>window.loadHist(window.hrs),60000);</script></body></html>";
+// Single-line HTML string including Humidity Priority controls and sliders
+const char PAGE[] PROGMEM = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#111111'><link rel='manifest' href='/manifest.json'><title>AC Controller</title><style>body{font-family:system-ui;margin:0;padding:16px;background:#111;color:#eee;max-width:460px;margin:auto}.card{background:#1d1d1d;border-radius:14px;padding:16px;margin-bottom:14px}.big{font-size:34px;font-weight:600}.row{display:flex;justify-content:space-around;text-align:center}.lbl{color:#999;font-size:13px}input[type=range]{width:100%}button{padding:9px 13px;border:0;border-radius:10px;background:#333;color:#eee;font-size:15px;margin:3px;cursor:pointer}button.on{background:#2a7}.st{font-size:20px;text-align:center}canvas{width:100%;height:200px;display:block;margin-top:8px}.lg span{margin-right:10px;font-size:12px;color:#999}.lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}</style></head><body><div class='card'><div class='row'><div><div class='big' id='t'>28.5</div><div class='lbl'>Temp &deg;C</div></div><div><div class='big' id='f'>29.2</div><div class='lbl'>Feels like</div></div><div><div class='big' id='h'>65</div><div class='lbl'>Humidity %</div></div></div><div class='lbl' style='text-align:center;margin-top:12px'>Outside (Kuriachira): <b id='o' style='color:#eee;font-size:18px'>--</b> &deg;C <span id='hint' style='color:#EF9F27'></span></div><div class='st' style='margin-top:10px'>AC: <b id='s'>OFF</b></div></div><div class='card'><div class='lbl'><span id='tl'>Target</span>: <b id='tv'>27.0</b> &deg;C</div><input type='range' id='tt' min='20' max='40' step='0.5' value='27.0' oninput='window.editing=1;document.getElementById(\"tv\").textContent=this.value' onchange='window.saveSettings()'><div style='margin-top:12px'><label><input type='checkbox' id='au' checked onchange='window.saveSettings()'> Auto control</label></div><div style='margin-top:6px'><label><input type='checkbox' id='hp' onchange='window.saveSettings()'> Humidity Priority (Ignores Temp)</label></div><div style='margin-top:6px'><label><input type='checkbox' id='fe' checked onchange='window.saveSettings()'> Use feels-like temperature</label></div><div style='margin-top:6px'><label><input type='checkbox' id='ue' checked onchange='window.saveSettings()'> Adapt to outdoor temperature</label></div><div style='margin-top:6px'><label><input type='checkbox' id='mo' checked onchange='window.saveSettings()'> Mock sensor (Test mode)</label></div><div style='margin-top:12px' class='lbl'>High Humidity (Dry trigger): <b id='thhv'>80</b>%</div><input type='range' id='thh' min='50' max='95' step='1' value='80' oninput='document.getElementById(\"thhv\").textContent=this.value' onchange='window.saveSettings()'><div style='margin-top:8px' class='lbl'>Low Humidity (Fan target): <b id='tlhv'>70</b>%</div><input type='range' id='tlh' min='40' max='90' step='1' value='70' oninput='document.getElementById(\"tlhv\").textContent=this.value' onchange='window.saveSettings()'></div><div class='card'><div class='lbl'>Manual Control (turns Auto off)</div><button onclick=\"window.sendManual('cool')\">Cool</button><button onclick=\"window.sendManual('fan')\">Fan</button><button onclick=\"window.sendManual('dry')\">Dry</button><button onclick=\"window.sendManual('off')\">Off</button></div><div class='card'><div class='lbl'>Actions (Keeps Auto active)</div><button onclick=\"window.sendDisplay()\" style=\"background:#2563eb\">Display Toggle</button></div><div class='card'><div style='display:flex;justify-content:space-between;align-items:center'><b>History</b><div><button class='rg' data-h='6' onclick='window.loadHist(6)'>6h</button><button class='rg on' data-h='24' onclick='window.loadHist(24)'>24h</button><button class='rg' data-h='168' onclick='window.loadHist(168)'>7d</button></div></div><canvas id='c'></canvas><div class='lg' style='margin-top:6px'><span><i style='background:#EF9F27'></i>Temp</span><span><i style='background:#D85A30'></i>Feels like</span><span><i style='background:#378ADD'></i>Humidity</span><span><i style='background:#97A3AB'></i>Outside</span><br><span><i style='background:rgba(55,138,221,.4)'></i>Cooling</span><span><i style='background:rgba(50,205,50,.8)'></i>Fan mode</span><span><i style='background:rgba(29,158,117,.4)'></i>Dry mode</span></div><div style='margin-top:8px'><label class='lbl'><input type='checkbox' id='so' onchange='if(window.lastD)window.drawGraph(window.lastD)'> Show outside</label></div></div><div class='lbl' style='text-align:center;margin-bottom:10px'>Outdoor data: <a href='https://open-meteo.com/' style='color:#999'>Open-Meteo.com</a></div><script>window.editing=0;window.hrs=24;window.lastD=null;function computeFeels(t,h){return t+0.33*(h/100*6.105*Math.exp(17.27*t/(237.7+t)))-4;}window.pollStatus=async function(){try{const res=await fetch('/api/status');const r=await res.json();document.getElementById('t').textContent=r.t.toFixed(1);document.getElementById('f').textContent=r.f.toFixed(1);document.getElementById('h').textContent=r.h.toFixed(0);document.getElementById('s').textContent=r.state;document.getElementById('o').textContent=r.o==null?'--':r.o.toFixed(1);document.getElementById('hint').textContent=r.hint?'· cooler outside, open window':'';document.getElementById('tl').textContent=r.feels?'Target feels-like':'Target temperature';if(!window.editing){document.getElementById('tt').value=r.tt;document.getElementById('au').checked=r.auto;document.getElementById('hp').checked=r.hp;document.getElementById('fe').checked=r.feels;document.getElementById('ue').checked=r.uo;document.getElementById('mo').checked=r.mock;document.getElementById('thh').value=r.thh;document.getElementById('thhv').textContent=r.thh;document.getElementById('tlh').value=r.tlh;document.getElementById('tlhv').textContent=r.tlh;document.getElementById('tv').textContent=r.tt;}}catch(e){console.error('Poll error:',e);}};window.saveSettings=async function(){console.log('Saving settings to ESP32...');try{const tt=document.getElementById('tt').value;const au=document.getElementById('au').checked?1:0;const hp=document.getElementById('hp').checked?1:0;const fe=document.getElementById('fe').checked?1:0;const ue=document.getElementById('ue').checked?1:0;const mo=document.getElementById('mo').checked?1:0;const thh=document.getElementById('thh').value;const tlh=document.getElementById('tlh').value;await fetch(`/api/set?temp=${tt}&auto=${au}&hp=${hp}&feels=${fe}&out=${ue}&mock=${mo}&thh=${thh}&tlh=${tlh}`);window.editing=0;window.pollStatus();}catch(e){console.error('Save error:',e);}};window.sendManual=async function(m){console.log('Manual mode trigger:',m);try{await fetch('/api/manual?m='+m);window.pollStatus();}catch(e){console.error('Manual error:',e);}};window.sendDisplay=async function(){console.log('Display toggle trigger');try{await fetch('/api/display');window.pollStatus();}catch(e){console.error('Display error:',e);}};window.loadHist=async function(n){window.hrs=n;document.querySelectorAll('.rg').forEach(b=>b.classList.toggle('on',b.dataset.h==n));try{const res=await fetch('/api/history?hours='+n);const d=await res.json();window.lastD=d;window.drawGraph(d);}catch(e){console.error('History error:',e);}};window.drawGraph=function(d){const c=document.getElementById('c');if(!c)return;const dp=window.devicePixelRatio||1;const W=c.clientWidth||300;const H=200;c.width=W*dp;c.height=H*dp;const g=c.getContext('2d');g.scale(dp,dp);const P=d.p;g.font='11px system-ui';g.fillStyle='#999';if(!P||P.length<2){g.fillText('Collecting data... (one point every 5 min)',8,24);return;}const t0=P[0][0],t1=P[P.length-1][0],L=35,R=30,T=10,B=20,w=W-L-R,h=H-T-B;const so=document.getElementById('so').checked;const ov=P.map(p=>p[4]==null?null:p[4]/10);const tv=P.map(p=>p[1]/10);const hv=P.map(p=>p[2]/10);const fv=P.map((p,i)=>computeFeels(tv[i],hv[i]));const all=tv.concat(fv,so?ov.filter(v=>v!=null):[]);const lo=Math.floor(Math.min(...all)-1);const hi=Math.ceil(Math.max(...all)+1);const X=t=>L+(t-t0)/(t1-t0)*w;const Y=v=>T+h-(v-lo)/(hi-lo)*h;g.strokeStyle='rgba(255,255,255,0.08)';g.lineWidth=1;g.fillStyle='#777';const stepV=Math.max(1,Math.round((hi-lo)/4));for(let v=Math.ceil(lo);v<=hi;v+=stepV){const py=Y(v);g.beginPath();g.setLineDash([3,3]);g.moveTo(L,py);g.lineTo(W-R,py);g.stroke();g.setLineDash([]);g.fillText(v+'\\u00b0C',2,py+3);}for(let i=0;i<P.length-1;i++){const s=P[i][3];if(s&&P[i+1][0]-P[i][0]<=d.step*3){if(s==1)g.fillStyle='rgba(55,138,221,.22)';else if(s==2)g.fillStyle='rgba(50,205,50,.8)';else if(s==3)g.fillStyle='rgba(29,158,117,.22)';else g.fillStyle='rgba(255,255,255,.05)';g.fillRect(X(P[i][0]),T,Math.max(1,X(P[i+1][0])-X(P[i][0])),h);}}const ln=(v,Yf,col,dash)=>{g.beginPath();g.strokeStyle=col;g.lineWidth=2;g.setLineDash(dash||[]);let pen=0;for(let i=0;i<P.length;i++){if(v[i]==null){pen=0;continue;}if(i&&P[i][0]-P[i-1][0]>d.step*3)pen=0;const px=X(P[i][0]),py=Yf(v[i]);if(pen)g.lineTo(px,py);else{g.moveTo(px,py);pen=1;}}g.stroke();g.setLineDash([]);};ln(hv,Y,'#378ADD');if(so)ln(ov,Y,'#97A3AB',[5,3]);ln(fv,Y,'#D85A30');ln(tv,Y,'#EF9F27');const f=t=>{const D=new Date(t*1000);return(window.hrs>24?D.toLocaleDateString([],{day:'numeric',month:'short'})+' ':'')+D.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});};g.textAlign='left';g.fillText(f(t0),L,H-4);g.textAlign='right';g.fillText(f(t1),W-R,H-4);};window.pollStatus();window.loadHist(24);setInterval(window.pollStatus,3000);setInterval(()=>window.loadHist(window.hrs),60000);</script></body></html>";
 
 // ---------- HELPERS ----------
 float feelsLike(float t, float rh) {
@@ -226,23 +230,30 @@ void control() {
     return;
   }
 
-  float ct = controlTemp();
-  float k = heatLoad();
-  float onOff  = ON_OFFSET_MILD  + (ON_OFFSET_HOT  - ON_OFFSET_MILD)  * k;
-  float offOff = OFF_OFFSET_MILD + (OFF_OFFSET_HOT - OFF_OFFSET_MILD) * k;
-
   AcState want = acState;
 
-  // 1. Humidity Safeguard with Hysteresis (Trigger Dry at >80%, Release at <=70%)
-  if (acState != ST_DRY && curH > 80.0f) {
-    want = ST_DRY;
-  } else if (acState == ST_DRY) {
-    if (curH <= 70.0f) {
-      // Humidity recovered, drop back to temperature-based evaluation
-      want = (ct >= targetT + onOff) ? ST_COOL : ST_FAN;
+  if (humidPriority) {
+    // --- HUMIDITY PRIORITY MODE ---
+    // Ignore temperature entirely. Use High & Low humidity sliders with hysteresis.
+    if (acState != ST_DRY && curH > targetHighH) {
+      want = ST_DRY;
+    } else if (acState == ST_DRY) {
+      if (curH <= targetLowH) {
+        want = ST_FAN; // Humidity controlled, switch to FAN
+      }
+    } else {
+      // If not in DRY, check if humidity is already low or acceptable
+      if (curH <= targetLowH && acState != ST_OFF) {
+        want = ST_FAN;
+      }
     }
   } else {
-    // Standard Temperature / Feels-like Auto Control Loop
+    // --- STANDARD TEMPERATURE / FEELS-LIKE AUTO CONTROL ---
+    float ct = controlTemp();
+    float k = heatLoad();
+    float onOff  = ON_OFFSET_MILD  + (ON_OFFSET_HOT  - ON_OFFSET_MILD)  * k;
+    float offOff = OFF_OFFSET_MILD + (OFF_OFFSET_HOT - OFF_OFFSET_MILD) * k;
+
     if (ct >= targetT + onOff) {
       want = ST_COOL;
     } else if (ct <= targetT - offOff) {
@@ -250,15 +261,15 @@ void control() {
     }
   }
 
-  // 2. Auto Mode Fan Timeout: If state is FAN for 15 continuous minutes, turn OFF
+  // Common 15-minute Fan Timeout Rule (Transitions FAN -> OFF)
   if (want == ST_FAN) {
     if (acState != ST_FAN) {
-      fanStartTime = now; // Start tracking fan duration
+      fanStartTime = now;
     } else if (now - fanStartTime >= 15UL * 60UL * 1000UL) {
       want = ST_OFF;
     }
   } else {
-    fanStartTime = now; // Reset timer if not in fan mode
+    fanStartTime = now;
   }
 
   if (firstRun) { firstRun = false; lastChange = now - MIN_CHANGE_MS; }
@@ -272,15 +283,16 @@ void control() {
 }
 
 void handleStatus() {
-  char buf[400], ob[12];
+  char buf[450], ob[12];
   float t = isnan(curT) ? 0 : curT, h = isnan(curH) ? 0 : curH;
   if (outdoorValid()) snprintf(ob, sizeof(ob), "%.1f", (float)outT);
   else strcpy(ob, "null");
   snprintf(buf, sizeof(buf),
-    "{\"t\":%.2f,\"h\":%.1f,\"f\":%.2f,\"o\":%s,\"tt\":%.1f,\"auto\":%s,\"feels\":%s,\"uo\":%s,\"mock\":%s,\"hint\":%s,\"state\":\"%s\"}",
+    "{\"t\":%.2f,\"h\":%.1f,\"f\":%.2f,\"o\":%s,\"tt\":%.1f,\"auto\":%s,\"hp\":%s,\"feels\":%s,\"uo\":%s,\"mock\":%s,\"thh\":%.0f,\"tlh\":%.0f,\"hint\":%s,\"state\":\"%s\"}",
     t, h, feelsLike(t, h), ob, targetT,
-    autoMode ? "true" : "false", useFeels ? "true" : "false",
-    useOutdoor ? "true" : "false", mockSensor ? "true" : "false",
+    autoMode ? "true" : "false", humidPriority ? "true" : "false",
+    useFeels ? "true" : "false", useOutdoor ? "true" : "false", mockSensor ? "true" : "false",
+    targetHighH, targetLowH,
     windowHint() ? "true" : "false", stateName[acState]);
   server.send(200, "application/json", buf);
 }
@@ -288,15 +300,21 @@ void handleStatus() {
 void handleSet() {
   if (server.hasArg("temp")) targetT = constrain(server.arg("temp").toFloat(), 20, 40);
   if (server.hasArg("auto")) autoMode = server.arg("auto") == "1";
+  if (server.hasArg("hp"))   humidPriority = server.arg("hp") == "1";
   if (server.hasArg("feels")) useFeels = server.arg("feels") == "1";
   if (server.hasArg("out"))  useOutdoor = server.arg("out") == "1";
   if (server.hasArg("mock")) mockSensor = server.arg("mock") == "1";
+  if (server.hasArg("thh"))  targetHighH = constrain(server.arg("thh").toFloat(), 50, 95);
+  if (server.hasArg("tlh"))  targetLowH = constrain(server.arg("tlh").toFloat(), 40, 90);
   
   prefs.putFloat("tt", targetT); 
   prefs.putBool("auto", autoMode); 
+  prefs.putBool("hp", humidPriority);
   prefs.putBool("feels", useFeels);
   prefs.putBool("out", useOutdoor);
   prefs.putBool("mock", mockSensor);
+  prefs.putFloat("thh", targetHighH);
+  prefs.putFloat("tlh", targetLowH);
   
   server.send(200, "text/plain", "ok");
 }
@@ -374,7 +392,6 @@ void handleManifest() {
   })JSON");
 }
 
-// Safe display function that handles missing/unplugged LCD without crashing
 void updateDisplay() {
   if (!lcdOk) return;
   char row1[17], row2[17];
@@ -385,7 +402,6 @@ void updateDisplay() {
   snprintf(row1, sizeof(row1), "T%.1f F%.1f H%d%%", fT, fF, iH);
   snprintf(row2, sizeof(row2), "AC: %-11s", stateName[acState]);
   
-  // Wrap I2C calls in error protection so unplugging LCD doesn't break execution
   Wire.beginTransmission(0x27);
   if (Wire.endTransmission() == 0) {
     lcd.setCursor(0, 0);
@@ -393,7 +409,7 @@ void updateDisplay() {
     lcd.setCursor(0, 1);
     lcd.print(row2);
   } else {
-    lcdOk = false; // Mark display inactive if unplugged at runtime
+    lcdOk = false;
   }
 }
 
@@ -424,11 +440,14 @@ void setup() {
 
   irsend.begin();
   prefs.begin("ac", false);
-  targetT    = prefs.getFloat("tt", 27.0);
-  autoMode   = prefs.getBool("auto", true);
-  useFeels   = prefs.getBool("feels", true);
-  useOutdoor = prefs.getBool("out", true);
-  mockSensor = prefs.getBool("mock", true);
+  targetT       = prefs.getFloat("tt", 27.0);
+  autoMode      = prefs.getBool("auto", true);
+  humidPriority = prefs.getBool("hp", false);
+  useFeels      = prefs.getBool("feels", true);
+  useOutdoor    = prefs.getBool("out", true);
+  mockSensor    = prefs.getBool("mock", true);
+  targetHighH   = prefs.getFloat("thh", 80.0);
+  targetLowH    = prefs.getFloat("tlh", 70.0);
 
   if (!LittleFS.begin(true)) {
     Serial.println("[SETUP] LittleFS mount failed");
@@ -437,11 +456,10 @@ void setup() {
   }
 
   Wire.begin(21, 22);
-  Wire.setClock(100000); // 100kHz for stable I2C communication with sensor and LCD backpack
+  Wire.setClock(100000);
   delay(100);
   sht31.begin(0x44);
 
-  // Safe LCD initialization check (won't lock up if LCD is unplugged at boot)
   Wire.beginTransmission(0x27);
   if (Wire.endTransmission() == 0) {
     lcd.init();
