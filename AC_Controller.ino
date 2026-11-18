@@ -417,7 +417,6 @@ void updateDisplay() {
   else if (acState == ST_DRY) shortState = "DRY";
 
   // Row 1: Temp, Humidity, Time (Max 16 chars: "T28.5 H74% 14:35")
-  snprintf(row1, sizeof(row1), "T%.1f H%%d %s", fT, iH, timeStr); // format cleanly
   snprintf(row1, sizeof(row1), "T%.1f H%d%% %s", fT, iH, timeStr);
 
   // Row 2: AC State & Short Date (Max 16 chars: "AC: COOL | 28-May")
